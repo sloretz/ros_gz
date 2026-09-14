@@ -220,10 +220,13 @@ TEST(ImageGzToRos, PayloadMatchingGeometryIsCopied)
 
 TEST(ImageGzToRos, PayloadLongerThanGeometryIsTruncated)
 {
-  const gz::msgs::Image gz_msg = MakeRgbImage(4, 3, 50);
+  // Overrun the 36-byte buffer by 64 KiB. A copy past the end of the buffer
+  // that is only a few bytes long can land in malloc slack and go unnoticed
+  // without AddressSanitizer; this one faults.
+  const gz::msgs::Image gz_msg = MakeRgbImage(4, 3, 36 + 64 * 1024);
 
   sensor_msgs::msg::Image ros_msg;
-  ASSERT_NO_FATAL_FAILURE(ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg));
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
 
   ASSERT_EQ(36u, ros_msg.data.size());
   for (size_t i = 0; i < ros_msg.data.size(); ++i) {
