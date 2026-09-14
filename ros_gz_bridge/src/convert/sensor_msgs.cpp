@@ -223,6 +223,23 @@ convert_gz_to_ros(
     return;
   }
   ros_msg.step = static_cast<uint32_t>(step);
+  const size_t size = static_cast<size_t>(image_size);
+
+  // A payload that does not match the geometry usually means pixel_format_type
+  // does not describe the bytes per pixel of the data. The copy below truncates
+  // or zero-pads it into a plausible-looking image, so say so.
+  const size_t payload_size = gz_msg.data().size();
+  if (payload_size != size) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      std::cerr << "Image payload does not match its geometry: " << ros_msg.width << "x" <<
+        ros_msg.height << " [" << ros_msg.encoding << "] needs " << size << " bytes (step " <<
+        ros_msg.step << "), the Gazebo message has " << payload_size << " bytes (step " <<
+        gz_msg.step() << "). The payload is " <<
+        (payload_size > size ? "truncated" : "zero-padded") <<
+        "; check the publisher's pixel_format_type. (Reported once.)" << std::endl;
+    }
+  }
 
   // The ROS image holds exactly step * height bytes: a longer Gazebo payload is
   // truncated and a shorter one is zero-padded. Assign from uint8_t pointers, not
@@ -231,8 +248,7 @@ convert_gz_to_ros(
   // uint8_t vector byte by byte (see https://github.com/gazebosim/ros_gz/pull/565).
   // For a well-formed payload resize() is a no-op; a short payload costs a second
   // copy and a zero-fill of the tail.
-  const size_t size = static_cast<size_t>(image_size);
-  const size_t copy_size = std::min(size, gz_msg.data().size());
+  const size_t copy_size = std::min(size, payload_size);
   const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
   ros_msg.data.assign(data, data + copy_size);
   ros_msg.data.resize(size);
