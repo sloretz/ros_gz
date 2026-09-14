@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 
@@ -199,7 +200,29 @@ convert_gz_to_ros(
   }
 
   ros_msg.is_bigendian = false;
-  ros_msg.step = ros_msg.width * num_channels * octets_per_channel;
+
+  // sensor_msgs/Image stores step as uint32 and a DDS sequence holds fewer than
+  // 2^32 elements. Compute the sizes in 64 bits so a geometry that does not fit
+  // is rejected instead of wrapping around to a buffer size that no longer
+  // matches width and height.
+  const uint64_t step = static_cast<uint64_t>(ros_msg.width) * num_channels * octets_per_channel;
+  const uint64_t image_size = step * ros_msg.height;
+  if (step > std::numeric_limits<uint32_t>::max() ||
+    image_size > std::numeric_limits<uint32_t>::max())
+  {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      std::cerr << "Image geometry " << ros_msg.width << "x" << ros_msg.height << " [" <<
+        ros_msg.encoding << "] exceeds sensor_msgs/Image limits, publishing an empty image." <<
+        " (Reported once.)" << std::endl;
+    }
+    ros_msg.width = 0;
+    ros_msg.height = 0;
+    ros_msg.step = 0;
+    ros_msg.data.clear();
+    return;
+  }
+  ros_msg.step = static_cast<uint32_t>(step);
 
   // The ROS image holds exactly step * height bytes: a longer Gazebo payload is
   // truncated and a shorter one is zero-padded. Assign from uint8_t pointers, not
@@ -208,7 +231,7 @@ convert_gz_to_ros(
   // uint8_t vector byte by byte (see https://github.com/gazebosim/ros_gz/pull/565).
   // For a well-formed payload resize() is a no-op; a short payload costs a second
   // copy and a zero-fill of the tail.
-  const size_t size = ros_msg.step * ros_msg.height;
+  const size_t size = static_cast<size_t>(image_size);
   const size_t copy_size = std::min(size, gz_msg.data().size());
   const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
   ros_msg.data.assign(data, data + copy_size);

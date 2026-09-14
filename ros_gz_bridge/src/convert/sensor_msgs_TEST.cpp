@@ -268,6 +268,36 @@ TEST(ImageGzToRos, ReusedMessageIsFullyOverwritten)
   }
 }
 
+TEST(ImageGzToRos, ImageSizeBeyondImageLimitsIsRejected)
+{
+  // step * height = 196608 * 65537 wraps to 196608 in 32 bits, which matches the
+  // payload, so a 32-bit size check would take this for a valid 65537-row image.
+  const gz::msgs::Image gz_msg = MakeRgbImage(65536, 65537, 196608);
+
+  sensor_msgs::msg::Image ros_msg;
+  ros_msg.data.assign(8, 0xAB);
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  EXPECT_EQ(0u, ros_msg.width);
+  EXPECT_EQ(0u, ros_msg.height);
+  EXPECT_EQ(0u, ros_msg.step);
+  EXPECT_TRUE(ros_msg.data.empty());
+}
+
+TEST(ImageGzToRos, StepBeyondImageLimitsIsRejected)
+{
+  // step = 0x55555556 * 3 = 0x100000002 wraps to 2 in 32 bits.
+  const gz::msgs::Image gz_msg = MakeRgbImage(0x55555556u, 1, 16);
+
+  sensor_msgs::msg::Image ros_msg;
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  EXPECT_EQ(0u, ros_msg.width);
+  EXPECT_EQ(0u, ros_msg.height);
+  EXPECT_EQ(0u, ros_msg.step);
+  EXPECT_TRUE(ros_msg.data.empty());
+}
+
 // ---------------------------------------------------------------------------
 // PointCloudPacked <-> PointCloud2 : the packed payload is copied verbatim in
 // both directions, including zero and 0xFF bytes.
