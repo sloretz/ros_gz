@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
 
 #include "convert/utils.hpp"
@@ -198,11 +200,16 @@ convert_gz_to_ros(
 
   ros_msg.is_bigendian = false;
   ros_msg.step = ros_msg.width * num_channels * octets_per_channel;
-  ros_msg.data.resize(ros_msg.step * ros_msg.height);
 
-  // Prefer memcpy over std::copy for performance reasons,
-  // see https://github.com/gazebosim/ros_gz/pull/565
-  memcpy(ros_msg.data.data(), gz_msg.data().c_str(), gz_msg.data().size());
+  // The ROS image holds exactly step * height bytes. Copy the Gazebo payload
+  // in a single bulk copy (see https://github.com/gazebosim/ros_gz/pull/565)
+  // without zero-filling the buffer first. A longer payload is truncated and
+  // a shorter one is padded with zeros.
+  const size_t size = ros_msg.step * ros_msg.height;
+  const size_t copy_size = std::min(size, gz_msg.data().size());
+  const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
+  ros_msg.data.assign(data, data + copy_size);
+  ros_msg.data.resize(size);
 }
 
 template<>
@@ -663,8 +670,11 @@ convert_ros_to_gz(
   gz_msg.set_point_step(ros_msg.point_step);
   gz_msg.set_row_step(ros_msg.row_step);
   gz_msg.set_is_dense(ros_msg.is_dense);
-  gz_msg.mutable_data()->resize(ros_msg.data.size());
-  memcpy(gz_msg.mutable_data()->data(), ros_msg.data.data(), ros_msg.data.size());
+  // Single bulk copy, without zero-filling the string first. set_data(ptr, size)
+  // is avoided on purpose: it copies the payload twice through a temporary
+  // std::string.
+  gz_msg.mutable_data()->assign(
+    reinterpret_cast<const char *>(ros_msg.data.data()), ros_msg.data.size());
 
   for (const auto & field : ros_msg.fields) {
     gz::msgs::PointCloudPacked::Field * pf = gz_msg.add_field();
@@ -715,8 +725,9 @@ convert_gz_to_ros(
   ros_msg.point_step = gz_msg.point_step();
   ros_msg.row_step = gz_msg.row_step();
   ros_msg.is_dense = gz_msg.is_dense();
-  ros_msg.data.resize(gz_msg.data().size());
-  memcpy(ros_msg.data.data(), gz_msg.data().c_str(), gz_msg.data().size());
+  // Single bulk copy, without zero-filling the buffer first.
+  const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
+  ros_msg.data.assign(data, data + gz_msg.data().size());
 
   for (int i = 0; i < gz_msg.field_size(); ++i) {
     sensor_msgs::msg::PointField pf;

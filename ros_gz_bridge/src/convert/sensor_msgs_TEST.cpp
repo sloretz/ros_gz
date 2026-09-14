@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Bounds-safety tests for sensor_msgs <-> gz::msgs converters.
+// Bounds-safety and payload-copy tests for sensor_msgs <-> gz::msgs converters.
 //
-// Every test in this file targets a specific out-of-bounds read or write
-// reachable from a *spec-conformant* input message. Without the
-// corresponding fixes these tests either crash (under AddressSanitizer)
-// or produce garbage values.
+// Most tests in this file target a specific out-of-bounds read or write
+// reachable from an input message. Without the corresponding fixes these
+// tests either crash (under AddressSanitizer) or produce garbage values.
 
 #include <gtest/gtest.h>
+
+#include <cstdint>
+#include <string>
 
 #include <ros_gz_bridge/convert/sensor_msgs.hpp>
 
@@ -175,4 +177,141 @@ TEST(CameraInfoGzToRos, IntrinsicsLongerThanRosArrayDoesNotOverflow)
   for (size_t i = 0; i < ros_msg.r.size(); ++i) {
     EXPECT_DOUBLE_EQ(static_cast<double>(i), ros_msg.r[i]);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Image GZ->ROS : the ROS data buffer is always step * height bytes. The
+// Gazebo payload length is not validated against the image geometry, so a
+// longer payload must not be written past the buffer and a shorter one must
+// leave a zero-filled tail.
+// ---------------------------------------------------------------------------
+namespace
+{
+gz::msgs::Image MakeRgbImage(unsigned int width, unsigned int height, size_t payload_size)
+{
+  gz::msgs::Image gz_msg;
+  gz_msg.set_width(width);
+  gz_msg.set_height(height);
+  gz_msg.set_pixel_format_type(gz::msgs::PixelFormatType::RGB_INT8);
+  std::string data(payload_size, '\0');
+  for (size_t i = 0; i < payload_size; ++i) {
+    data[i] = static_cast<char>(i + 1);
+  }
+  gz_msg.set_data(data);
+  return gz_msg;
+}
+}  // namespace
+
+TEST(ImageGzToRos, PayloadMatchingGeometryIsCopied)
+{
+  // 4x3 RGB8: step = 12, step * height = 36 bytes.
+  const gz::msgs::Image gz_msg = MakeRgbImage(4, 3, 36);
+
+  sensor_msgs::msg::Image ros_msg;
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  EXPECT_EQ("rgb8", ros_msg.encoding);
+  EXPECT_EQ(12u, ros_msg.step);
+  ASSERT_EQ(36u, ros_msg.data.size());
+  for (size_t i = 0; i < ros_msg.data.size(); ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(gz_msg.data()[i]), ros_msg.data[i]) << "byte " << i;
+  }
+}
+
+TEST(ImageGzToRos, PayloadLongerThanGeometryIsTruncated)
+{
+  const gz::msgs::Image gz_msg = MakeRgbImage(4, 3, 50);
+
+  sensor_msgs::msg::Image ros_msg;
+  ASSERT_NO_FATAL_FAILURE(ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg));
+
+  ASSERT_EQ(36u, ros_msg.data.size());
+  for (size_t i = 0; i < ros_msg.data.size(); ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(gz_msg.data()[i]), ros_msg.data[i]) << "byte " << i;
+  }
+}
+
+TEST(ImageGzToRos, PayloadShorterThanGeometryIsZeroPadded)
+{
+  const gz::msgs::Image gz_msg = MakeRgbImage(4, 3, 20);
+
+  sensor_msgs::msg::Image ros_msg;
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  ASSERT_EQ(36u, ros_msg.data.size());
+  for (size_t i = 0; i < 20; ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(gz_msg.data()[i]), ros_msg.data[i]) << "byte " << i;
+  }
+  for (size_t i = 20; i < ros_msg.data.size(); ++i) {
+    EXPECT_EQ(0u, ros_msg.data[i]) << "byte " << i;
+  }
+}
+
+TEST(ImageGzToRos, ReusedMessageIsFullyOverwritten)
+{
+  sensor_msgs::msg::Image ros_msg;
+  ros_msg.data.assign(36, 0xAB);
+
+  // A short payload must not leave stale bytes from the previous contents.
+  const gz::msgs::Image gz_msg = MakeRgbImage(4, 3, 20);
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  ASSERT_EQ(36u, ros_msg.data.size());
+  for (size_t i = 0; i < 20; ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(gz_msg.data()[i]), ros_msg.data[i]) << "byte " << i;
+  }
+  for (size_t i = 20; i < ros_msg.data.size(); ++i) {
+    EXPECT_EQ(0u, ros_msg.data[i]) << "byte " << i;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PointCloudPacked <-> PointCloud2 : the packed payload is copied verbatim in
+// both directions, including zero and 0xFF bytes.
+// ---------------------------------------------------------------------------
+TEST(PointCloudPacked, RoundTripPreservesPayload)
+{
+  gz::msgs::PointCloudPacked gz_msg;
+  gz_msg.set_width(5);
+  gz_msg.set_height(2);
+  gz_msg.set_point_step(4);
+  gz_msg.set_row_step(20);
+  auto * field = gz_msg.add_field();
+  field->set_name("x");
+  field->set_offset(0);
+  field->set_count(1);
+  field->set_datatype(gz::msgs::PointCloudPacked::Field::FLOAT32);
+  std::string data(40, '\0');
+  for (size_t i = 0; i < data.size(); ++i) {
+    data[i] = static_cast<char>(0xFF - i * 7);
+  }
+  data[3] = '\0';
+  gz_msg.set_data(data);
+
+  sensor_msgs::msg::PointCloud2 ros_msg;
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+  ASSERT_EQ(data.size(), ros_msg.data.size());
+  for (size_t i = 0; i < data.size(); ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(data[i]), ros_msg.data[i]) << "byte " << i;
+  }
+
+  gz::msgs::PointCloudPacked gz_round_trip;
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_round_trip);
+  EXPECT_EQ(data, gz_round_trip.data());
+  EXPECT_EQ(5u, gz_round_trip.width());
+  EXPECT_EQ(2u, gz_round_trip.height());
+  ASSERT_EQ(1, gz_round_trip.field_size());
+  EXPECT_EQ("x", gz_round_trip.field(0).name());
+}
+
+TEST(PointCloudPacked, EmptyPayloadRoundTrip)
+{
+  gz::msgs::PointCloudPacked gz_msg;
+  sensor_msgs::msg::PointCloud2 ros_msg;
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+  EXPECT_TRUE(ros_msg.data.empty());
+
+  gz::msgs::PointCloudPacked gz_round_trip;
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_round_trip);
+  EXPECT_TRUE(gz_round_trip.data().empty());
 }

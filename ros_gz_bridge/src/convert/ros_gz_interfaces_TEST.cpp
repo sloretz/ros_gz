@@ -14,6 +14,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <string>
+
 #include <ros_gz_bridge/convert/ros_gz_interfaces.hpp>
 
 // A more specific set of tests for the ros_gz_interfaces/msg/ParamVec to
@@ -241,4 +244,36 @@ TEST_F(GzToRosTest, ChildParameters)
 
   EXPECT_EQ("child_2/child_0/bool_param", ros_msg.params[4].name);
   EXPECT_EQ(kParamBoolValue, ros_msg.params[4].value.bool_value);
+}
+
+// The Dataframe payload is opaque bytes and must be copied verbatim,
+// including zero and 0xFF bytes.
+TEST(DataframeGzToRos, PayloadIsCopiedVerbatim)
+{
+  gz::msgs::Dataframe gz_msg;
+  gz_msg.set_src_address("src");
+  gz_msg.set_dst_address("dst");
+  const std::string payload("\x00\x01\x7f\x80\xfe\xff", 6);
+  gz_msg.set_data(payload);
+
+  ros_gz_interfaces::msg::Dataframe ros_msg;
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  EXPECT_EQ("src", ros_msg.src_address);
+  EXPECT_EQ("dst", ros_msg.dst_address);
+  ASSERT_EQ(payload.size(), ros_msg.data.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(payload[i]), ros_msg.data[i]) << "byte " << i;
+  }
+}
+
+TEST(DataframeGzToRos, EmptyPayloadClearsReusedMessage)
+{
+  gz::msgs::Dataframe gz_msg;
+
+  ros_gz_interfaces::msg::Dataframe ros_msg;
+  ros_msg.data = {1, 2, 3};
+  ros_gz_bridge::convert_gz_to_ros(gz_msg, ros_msg);
+
+  EXPECT_TRUE(ros_msg.data.empty());
 }

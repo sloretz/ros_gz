@@ -379,11 +379,9 @@ convert_gz_to_ros(
     }
   }
 
-  ros_msg.data.resize(gz_msg.data().size());
-  std::copy(
-    gz_msg.data().begin(),
-    gz_msg.data().begin() + gz_msg.data().size(),
-    ros_msg.data.begin());
+  // Single bulk copy, without zero-filling the buffer first.
+  const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
+  ros_msg.data.assign(data, data + gz_msg.data().size());
 }
 
 template<>
