@@ -201,10 +201,13 @@ convert_gz_to_ros(
   ros_msg.is_bigendian = false;
   ros_msg.step = ros_msg.width * num_channels * octets_per_channel;
 
-  // The ROS image holds exactly step * height bytes. Copy the Gazebo payload
-  // in a single bulk copy (see https://github.com/gazebosim/ros_gz/pull/565)
-  // without zero-filling the buffer first. A longer payload is truncated and
-  // a shorter one is padded with zeros.
+  // The ROS image holds exactly step * height bytes: a longer Gazebo payload is
+  // truncated and a shorter one is zero-padded. Assign from uint8_t pointers, not
+  // from string iterators: with matching pointer types assign() is a single bulk
+  // copy with no zero-fill first, while libstdc++ copies char iterators into a
+  // uint8_t vector byte by byte (see https://github.com/gazebosim/ros_gz/pull/565).
+  // For a well-formed payload resize() is a no-op; a short payload costs a second
+  // copy and a zero-fill of the tail.
   const size_t size = ros_msg.step * ros_msg.height;
   const size_t copy_size = std::min(size, gz_msg.data().size());
   const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
@@ -725,7 +728,8 @@ convert_gz_to_ros(
   ros_msg.point_step = gz_msg.point_step();
   ros_msg.row_step = gz_msg.row_step();
   ros_msg.is_dense = gz_msg.is_dense();
-  // Single bulk copy, without zero-filling the buffer first.
+  // Assign from uint8_t pointers, not string iterators, so this is a single bulk
+  // copy with no zero-fill first.
   const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
   ros_msg.data.assign(data, data + gz_msg.data().size());
 

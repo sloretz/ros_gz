@@ -379,7 +379,8 @@ convert_gz_to_ros(
     }
   }
 
-  // Single bulk copy, without zero-filling the buffer first.
+  // Assign from uint8_t pointers, not string iterators, so this is a single bulk
+  // copy with no zero-fill first.
   const auto * data = reinterpret_cast<const uint8_t *>(gz_msg.data().data());
   ros_msg.data.assign(data, data + gz_msg.data().size());
 }
