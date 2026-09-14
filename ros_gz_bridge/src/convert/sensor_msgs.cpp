@@ -123,9 +123,49 @@ convert_ros_to_gz(
     return;
   }
 
-  gz_msg.set_step(gz_msg.width() * num_channels * octets_per_channel);
+  // Compute the sizes in 64 bits so a geometry that does not fit is rejected
+  // instead of wrapping around to a size that no longer matches width and height.
+  const uint64_t step = static_cast<uint64_t>(ros_msg.width) * num_channels * octets_per_channel;
+  const uint64_t image_size = step * ros_msg.height;
+  if (step > std::numeric_limits<uint32_t>::max() ||
+    image_size > std::numeric_limits<uint32_t>::max())
+  {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      std::cerr << "Image geometry " << ros_msg.width << "x" << ros_msg.height << " [" <<
+        ros_msg.encoding << "] is too large, sending an empty image. (Reported once.)" <<
+        std::endl;
+    }
+    gz_msg.set_width(0);
+    gz_msg.set_height(0);
+    gz_msg.set_step(0);
+    gz_msg.clear_data();
+    return;
+  }
+  gz_msg.set_step(static_cast<uint32_t>(step));
+  const size_t size = static_cast<size_t>(image_size);
 
-  gz_msg.set_data(&(ros_msg.data[0]), gz_msg.step() * gz_msg.height());
+  // Nothing guarantees that the ROS data holds step * height bytes. Never read
+  // past it: a longer payload is truncated and a shorter or empty one is
+  // zero-padded, so Gazebo consumers can still trust the geometry.
+  const size_t payload_size = ros_msg.data.size();
+  if (payload_size != size) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      std::cerr << "ROS Image payload does not match its geometry: " << ros_msg.width << "x" <<
+        ros_msg.height << " [" << ros_msg.encoding << "] needs " << size << " bytes (step " <<
+        step << "), the ROS message has " << payload_size << " bytes (step " << ros_msg.step <<
+        "). The payload is " << (payload_size > size ? "truncated" : "zero-padded") <<
+        "; check the encoding and step of the publisher. (Reported once.)" << std::endl;
+    }
+  }
+
+  // Single bulk copy, without zero-filling the string first. set_data(ptr, size)
+  // is avoided on purpose: with protobuf 3.21 it copies the payload twice
+  // through a temporary std::string.
+  const size_t copy_size = std::min(size, payload_size);
+  gz_msg.mutable_data()->assign(reinterpret_cast<const char *>(ros_msg.data.data()), copy_size);
+  gz_msg.mutable_data()->resize(size);
 }
 
 template<>

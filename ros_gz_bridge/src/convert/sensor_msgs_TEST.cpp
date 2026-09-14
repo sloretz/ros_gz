@@ -299,6 +299,99 @@ TEST(ImageGzToRos, StepBeyondImageLimitsIsRejected)
 }
 
 // ---------------------------------------------------------------------------
+// Image ROS->GZ : nothing guarantees that the ROS data holds step * height
+// bytes, so the Gazebo payload must be built without reading past the ROS
+// buffer. A longer payload is truncated and a shorter or empty one is
+// zero-padded to the image geometry.
+// ---------------------------------------------------------------------------
+namespace
+{
+sensor_msgs::msg::Image MakeRosRgbImage(uint32_t width, uint32_t height, size_t data_size)
+{
+  sensor_msgs::msg::Image ros_msg;
+  ros_msg.width = width;
+  ros_msg.height = height;
+  ros_msg.encoding = "rgb8";
+  ros_msg.step = width * 3;
+  ros_msg.data.resize(data_size);
+  for (size_t i = 0; i < data_size; ++i) {
+    ros_msg.data[i] = static_cast<uint8_t>(i % 255 + 1);
+  }
+  return ros_msg;
+}
+}  // namespace
+
+TEST(ImageRosToGz, PayloadMatchingGeometryIsCopied)
+{
+  const sensor_msgs::msg::Image ros_msg = MakeRosRgbImage(4, 3, 36);
+
+  gz::msgs::Image gz_msg;
+  gz_msg.set_data(std::string(64, '\xAB'));
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_msg);
+
+  EXPECT_EQ(gz::msgs::PixelFormatType::RGB_INT8, gz_msg.pixel_format_type());
+  EXPECT_EQ(12u, gz_msg.step());
+  ASSERT_EQ(36u, gz_msg.data().size());
+  for (size_t i = 0; i < gz_msg.data().size(); ++i) {
+    EXPECT_EQ(ros_msg.data[i], static_cast<uint8_t>(gz_msg.data()[i])) << "byte " << i;
+  }
+}
+
+TEST(ImageRosToGz, PayloadLongerThanGeometryIsTruncated)
+{
+  const sensor_msgs::msg::Image ros_msg = MakeRosRgbImage(4, 3, 50);
+
+  gz::msgs::Image gz_msg;
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_msg);
+
+  ASSERT_EQ(36u, gz_msg.data().size());
+  for (size_t i = 0; i < gz_msg.data().size(); ++i) {
+    EXPECT_EQ(ros_msg.data[i], static_cast<uint8_t>(gz_msg.data()[i])) << "byte " << i;
+  }
+}
+
+TEST(ImageRosToGz, PayloadShorterThanGeometryIsZeroPadded)
+{
+  // 2048x2048 rgb8 needs 12 MiB but the ROS buffer holds 16 bytes. Reading
+  // step * height bytes from it faults even without AddressSanitizer.
+  const sensor_msgs::msg::Image ros_msg = MakeRosRgbImage(2048, 2048, 16);
+
+  gz::msgs::Image gz_msg;
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_msg);
+
+  ASSERT_EQ(2048u * 2048u * 3u, gz_msg.data().size());
+  for (size_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(ros_msg.data[i], static_cast<uint8_t>(gz_msg.data()[i])) << "byte " << i;
+  }
+  EXPECT_EQ(std::string::npos, gz_msg.data().find_first_not_of('\0', 16));
+}
+
+TEST(ImageRosToGz, EmptyPayloadIsZeroPadded)
+{
+  const sensor_msgs::msg::Image ros_msg = MakeRosRgbImage(4, 3, 0);
+
+  gz::msgs::Image gz_msg;
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_msg);
+
+  EXPECT_EQ(std::string(36, '\0'), gz_msg.data());
+}
+
+TEST(ImageRosToGz, GeometryBeyondImageLimitsIsRejected)
+{
+  // step * height = 196608 * 65537 wraps to 196608 in 32 bits.
+  const sensor_msgs::msg::Image ros_msg = MakeRosRgbImage(65536, 65537, 16);
+
+  gz::msgs::Image gz_msg;
+  gz_msg.set_data("stale");
+  ros_gz_bridge::convert_ros_to_gz(ros_msg, gz_msg);
+
+  EXPECT_EQ(0u, gz_msg.width());
+  EXPECT_EQ(0u, gz_msg.height());
+  EXPECT_EQ(0u, gz_msg.step());
+  EXPECT_TRUE(gz_msg.data().empty());
+}
+
+// ---------------------------------------------------------------------------
 // PointCloudPacked <-> PointCloud2 : the packed payload is copied verbatim in
 // both directions, including zero and 0xFF bytes.
 // ---------------------------------------------------------------------------
