@@ -16,9 +16,12 @@
 #include <gz/msgs/image.pb.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <future>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 
@@ -32,6 +35,63 @@
 #include "utils/ros_test_msg.hpp"
 
 using namespace std::chrono_literals;
+
+namespace
+{
+
+// While non-zero, allocations of at least this many bytes made on this thread
+// are counted in g_counted_allocations.
+thread_local std::size_t g_min_counted_allocation = 0;
+thread_local std::size_t g_counted_allocations = 0;
+
+// Counts the allocations of at least min_size bytes made on the calling thread
+// during its lifetime.
+class LargeAllocationCounter
+{
+public:
+  explicit LargeAllocationCounter(std::size_t min_size)
+  {
+    g_counted_allocations = 0;
+    g_min_counted_allocation = min_size;
+  }
+
+  ~LargeAllocationCounter()
+  {
+    g_min_counted_allocation = 0;
+  }
+
+  std::size_t Count() const
+  {
+    return g_counted_allocations;
+  }
+};
+
+}  // namespace
+
+// Replace the global allocation functions so full-payload allocations, which
+// include every copy of a message, can be counted. They are not inlined so the
+// compiler does not see malloc and free paired with new and delete, and warn
+// with -Wmismatched-new-delete.
+[[gnu::noinline]] void * operator new(std::size_t size)
+{
+  if (g_min_counted_allocation != 0 && size >= g_min_counted_allocation) {
+    ++g_counted_allocations;
+  }
+  if (void * ptr = std::malloc(size == 0 ? 1 : size)) {
+    return ptr;
+  }
+  throw std::bad_alloc();
+}
+
+[[gnu::noinline]] void operator delete(void * ptr) noexcept
+{
+  std::free(ptr);
+}
+
+[[gnu::noinline]] void operator delete(void * ptr, std::size_t) noexcept
+{
+  std::free(ptr);
+}
 
 namespace
 {
@@ -72,6 +132,8 @@ protected:
 
   /// Pass the gz test Image through the bridge callback and return what an
   /// intra-process subscriber taking ownership received, or nullptr.
+  /// Stores in payload_allocations_ how many allocations at least as large as
+  /// the image data the callback made.
   std::unique_ptr<sensor_msgs::msg::Image> BridgeTestImage(
     const std::string & topic,
     const ros_gz_bridge::BridgeHandleGzToRosParameters & params)
@@ -99,7 +161,11 @@ protected:
 
     gz::msgs::Image gz_msg;
     ros_gz_bridge::testing::createTestMsg(gz_msg);
-    ImageFactory::gz_callback(gz_msg, pub, params);
+    {
+      LargeAllocationCounter counter(gz_msg.data().size());
+      ImageFactory::gz_callback(gz_msg, pub, params);
+      payload_allocations_ = counter.Count();
+    }
 
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(sink_node_);
@@ -113,6 +179,7 @@ protected:
 
   rclcpp::Node::SharedPtr bridge_node_;
   rclcpp::Node::SharedPtr sink_node_;
+  std::size_t payload_allocations_ = 0;
 };
 
 // A gz Image bridged by a node with intra-process comms enabled reaches an
@@ -140,4 +207,15 @@ TEST_F(IntraProcessTest, AppliesHeaderOverrides)
   EXPECT_EQ("overridden_frame", ros_msg->header.frame_id);
   EXPECT_GE(ros_msg->header.stamp.sec, before);
   EXPECT_LE(ros_msg->header.stamp.sec, after);
+}
+
+// The bridged message is handed to the single owning intra-process subscriber
+// without being copied: the only full-payload allocation is the image data
+// filled by the conversion. Publishing by const reference would make rclcpp
+// duplicate the whole message first, a second full-payload allocation.
+TEST_F(IntraProcessTest, PublishesWithoutCopyingPayload)
+{
+  auto ros_msg = BridgeTestImage("/intra_process_image_no_copy", {});
+  ASSERT_NE(nullptr, ros_msg);
+  EXPECT_EQ(1u, payload_allocations_);
 }
